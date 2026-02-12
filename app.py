@@ -112,7 +112,10 @@ def plot_spectrogram(spectrogram, sr=16000, title="Mel Spectrogram"):
 
 def predict_audio(model, audio_file, target_width):
     """
-    Process audio and make prediction.
+    Process audio and make prediction using chunk-based analysis.
+    
+    Splits longer audio (up to 60s) into 3-second chunks, predicts each
+    chunk independently, and aggregates results.
     
     Args:
         model: Trained Keras model
@@ -120,38 +123,72 @@ def predict_audio(model, audio_file, target_width):
         target_width: Target width for padding
     
     Returns:
-        tuple: (prediction, confidence, audio, sr, spectrogram)
+        tuple: (prediction, confidence, audio, sr, spectrogram, chunk_results)
     """
+    import librosa as lr
+    
     # Save uploaded file temporarily
     temp_path = "temp_audio.wav"
     with open(temp_path, "wb") as f:
         f.write(audio_file.getbuffer())
     
-    # Preprocess audio
-    audio = preprocess_audio(temp_path, sr=16000, duration=3.0)
     sr = 16000
+    chunk_duration = 3.0  # seconds per chunk (model's expected input)
+    max_duration = 60.0   # max 1 minute
+    chunk_samples = int(sr * chunk_duration)
     
-    # Extract features
-    spectrogram = extract_mel_spectrogram(audio, sr=sr)
-    features = prepare_cnn_input(spectrogram)
-    features = np.expand_dims(features, axis=0)  # Add batch dimension
+    # Load full audio (up to 60 seconds)
+    full_audio, _ = lr.load(temp_path, sr=sr, duration=max_duration)
     
-    # Pad features
-    features = pad_features(features, target_width)
+    # Trim silence from the full audio
+    full_audio, _ = lr.effects.trim(full_audio, top_db=20)
     
-    # Normalize
-    features = normalize_features(features)
+    # If audio is shorter than one chunk, pad it
+    if len(full_audio) < chunk_samples:
+        full_audio = np.pad(full_audio, (0, chunk_samples - len(full_audio)))
     
-    # Make prediction
-    prediction_proba = model.predict(features, verbose=0)[0][0]
-    prediction = 1 if prediction_proba > 0.5 else 0
-    confidence = prediction_proba if prediction == 1 else (1 - prediction_proba)
+    # Split into 3-second chunks
+    num_chunks = len(full_audio) // chunk_samples
+    chunks = [full_audio[i * chunk_samples:(i + 1) * chunk_samples] for i in range(num_chunks)]
+    
+    # Predict each chunk
+    chunk_results = []
+    all_spectrograms = []
+    
+    for i, chunk in enumerate(chunks):
+        spectrogram = extract_mel_spectrogram(chunk, sr=sr)
+        all_spectrograms.append(spectrogram)
+        features = prepare_cnn_input(spectrogram)
+        features = np.expand_dims(features, axis=0)
+        features = pad_features(features, target_width)
+        features = normalize_features(features)
+        
+        proba = model.predict(features, verbose=0)[0][0]
+        chunk_pred = 1 if proba > 0.5 else 0
+        chunk_conf = proba if chunk_pred == 1 else (1 - proba)
+        
+        chunk_results.append({
+            'chunk': i + 1,
+            'start': i * chunk_duration,
+            'end': (i + 1) * chunk_duration,
+            'prediction': 'Fake' if chunk_pred == 1 else 'Real',
+            'confidence': chunk_conf,
+            'raw_score': proba
+        })
+    
+    # Aggregate: average raw scores across all chunks
+    avg_score = np.mean([r['raw_score'] for r in chunk_results])
+    prediction = 1 if avg_score > 0.5 else 0
+    confidence = avg_score if prediction == 1 else (1 - avg_score)
+    
+    # Use the first chunk's spectrogram for display
+    spectrogram = all_spectrograms[0]
     
     # Clean up
     if os.path.exists(temp_path):
         os.remove(temp_path)
     
-    return prediction, confidence, audio, sr, spectrogram
+    return prediction, confidence, full_audio, sr, spectrogram, chunk_results
 
 
 def main():
@@ -184,9 +221,9 @@ def main():
         st.header("ℹ️ Instructions")
         st.write("""
         1. Upload an audio file (WAV, MP3, etc.)
-        2. View the waveform and spectrogram
-        3. See the prediction and confidence score
-        4. Audio is automatically processed to 3 seconds
+        2. Audio up to **60 seconds** is supported
+        3. Audio is split into 3-second chunks for analysis
+        4. View per-chunk and overall predictions
         """)
         
         st.header("🔧 Technical Details")
@@ -194,7 +231,8 @@ def main():
         - **Model**: CNN with Batch Normalization
         - **Features**: Mel Spectrogram
         - **Sample Rate**: 16 kHz
-        - **Duration**: 3 seconds
+        - **Max Duration**: 60 seconds
+        - **Analysis**: Chunk-based (3s segments)
         """)
     
     # Main content
@@ -225,7 +263,7 @@ def main():
         # Make prediction
         with st.spinner("🔍 Analyzing audio..."):
             try:
-                prediction, confidence, audio, sr, spectrogram = predict_audio(
+                prediction, confidence, audio, sr, spectrogram, chunk_results = predict_audio(
                     model, uploaded_file, target_width
                 )
                 
@@ -291,11 +329,34 @@ def main():
                     raw_score = confidence if prediction == 1 else (1 - confidence)
                     st.metric("Raw Score", f"{raw_score:.4f}")
                 
+                # Per-chunk analysis
+                if len(chunk_results) > 1:
+                    st.header("🧩 Per-Chunk Analysis")
+                    st.write(f"Audio split into **{len(chunk_results)} chunks** of 3 seconds each:")
+                    
+                    import pandas as pd
+                    chunk_df = pd.DataFrame(chunk_results)
+                    chunk_df['Time Range'] = chunk_df.apply(
+                        lambda r: f"{r['start']:.0f}s - {r['end']:.0f}s", axis=1
+                    )
+                    chunk_df['Confidence'] = chunk_df['confidence'].apply(
+                        lambda c: f"{c*100:.1f}%"
+                    )
+                    display_df = chunk_df[['chunk', 'Time Range', 'prediction', 'Confidence']]
+                    display_df.columns = ['Chunk #', 'Time Range', 'Prediction', 'Confidence']
+                    st.dataframe(display_df, use_container_width=True, hide_index=True)
+                    
+                    # Summary stats
+                    fake_chunks = sum(1 for r in chunk_results if r['prediction'] == 'Fake')
+                    real_chunks = sum(1 for r in chunk_results if r['prediction'] == 'Real')
+                    st.write(f"**Real chunks**: {real_chunks} | **Fake chunks**: {fake_chunks}")
+                
                 # Audio info
                 with st.expander("🔍 Audio Information"):
                     st.write(f"**Duration**: {len(audio)/sr:.2f} seconds")
                     st.write(f"**Sample Rate**: {sr} Hz")
                     st.write(f"**Samples**: {len(audio)}")
+                    st.write(f"**Chunks Analyzed**: {len(chunk_results)}")
                     st.write(f"**Spectrogram Shape**: {spectrogram.shape}")
                 
                 # Play audio
