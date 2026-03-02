@@ -730,7 +730,7 @@ def predict_audio(model, audio_file, target_width):
     """
     Process audio and make prediction using chunk-based analysis.
 
-    Splits longer audio (up to 60s) into 3-second chunks, predicts each
+    Splits longer audio (up to 10 min) into 3-second chunks, predicts each
     chunk independently, and aggregates results.
 
     Args:
@@ -750,10 +750,10 @@ def predict_audio(model, audio_file, target_width):
 
     sr = 16000
     chunk_duration = 3.0   # seconds per chunk (model's expected input)
-    max_duration = 60.0    # max 1 minute
+    max_duration = 600.0   # max 10 minutes
     chunk_samples = int(sr * chunk_duration)
 
-    # Load full audio (up to 60 seconds)
+    # Load full audio (up to 10 minutes)
     full_audio, _ = lr.load(temp_path, sr=sr, duration=max_duration)
 
     # Trim silence from the full audio
@@ -850,7 +850,7 @@ def render_upload_section():
     uploaded_file = st.file_uploader(
         "Drag and drop your audio file here",
         type=['wav', 'mp3', 'flac', 'ogg', 'm4a'],
-        help="Supported formats: WAV, MP3, FLAC, OGG, M4A  •  Max duration: 60 seconds"
+        help="Supported formats: WAV, MP3, FLAC, OGG, M4A  •  Max duration: 10 minutes"
     )
     return uploaded_file
 
@@ -1183,7 +1183,7 @@ def main():
                 Upload an audio file to begin deepfake analysis
             </p>
             <p style="font-size:0.9rem; color:#64748B;">
-                Supports WAV, MP3, FLAC, OGG, M4A  •  Up to 60 seconds
+                Supports WAV, MP3, FLAC, OGG, M4A  •  Up to 10 minutes
             </p>
         </div>
         """, unsafe_allow_html=True)
